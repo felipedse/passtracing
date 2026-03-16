@@ -130,12 +130,10 @@
         let currentScale = 1.0;
         let previousDidPressHideImage = false;
         let previousDidPressHideInstructions = false;
-        let surfaceY = 0;
-        let isCalibrated = false;
-        let didPressGripPrev = false;
-        let hitTestSource = null;
-        let hitTestSourceRequested = false;
-        const GRIP_TO_SURFACE_OFFSET = 0.04; // ~4cm from grip center to controller bottom
+        let isGrabbing = false;
+        let grabLocalMatrix = null;
+        let grabStartDistance = 0;
+        let grabStartScale = 1.0;
 
         init();
         animate();
@@ -288,37 +286,13 @@
 
 
                 new ThreeMeshUI.Text({
-                    content: "\n\nGrip (on surface): ",
+                    content: "\n\nBoth grips: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
 
                 new ThreeMeshUI.Text({
-                    content: "Detect surface plane",
-                    fontSize: 0.025,
-                    fontColor: new THREE.Color(0xffffff)
-                }),
-
-                new ThreeMeshUI.Text({
-                    content: "\nGrip + analog up/down: ",
-                    fontSize: 0.025,
-                    fontColor: new THREE.Color(0xffff00)
-                }),
-
-                new ThreeMeshUI.Text({
-                    content: "Adjust height",
-                    fontSize: 0.025,
-                    fontColor: new THREE.Color(0xffffff)
-                }),
-
-                new ThreeMeshUI.Text({
-                    content: "\nHold trigger: ",
-                    fontSize: 0.025,
-                    fontColor: new THREE.Color(0xffff00)
-                }),
-
-                new ThreeMeshUI.Text({
-                    content: "Move image on surface",
+                    content: "Grab and move image",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
@@ -377,9 +351,7 @@
                 url,
 
                 function (texture) {
-                    document.body.appendChild(ARButton.createButton(renderer, {
-                        optionalFeatures: ['hit-test']
-                    }));
+                    document.body.appendChild(ARButton.createButton(renderer));
 
                     let originalWidth = texture.image.width;
                     let originalHeight = texture.image.height;
@@ -452,6 +424,33 @@
             renderer.render(scene, camera);
         }
 
+        function computeGrabMatrix(c1Pos, c2Pos, c1Quat, c2Quat) {
+            const midpoint = c1Pos.clone().add(c2Pos).multiplyScalar(0.5);
+            const direction = c2Pos.clone().sub(c1Pos).normalize();
+
+            // Average "up" from both controllers for full 3-axis rotation
+            const up1 = new THREE.Vector3(0, 1, 0).applyQuaternion(c1Quat);
+            const up2 = new THREE.Vector3(0, 1, 0).applyQuaternion(c2Quat);
+            const avgUp = up1.add(up2).normalize();
+
+            let forward = new THREE.Vector3().crossVectors(avgUp, direction);
+            if (forward.lengthSq() < 0.001) {
+                forward.set(0, 0, 1);
+            }
+            forward.normalize();
+
+            const correctedUp = new THREE.Vector3().crossVectors(direction, forward).normalize();
+
+            const rotMatrix = new THREE.Matrix4().makeBasis(direction, correctedUp, forward);
+            const quaternion = new THREE.Quaternion().setFromRotationMatrix(rotMatrix);
+
+            return new THREE.Matrix4().compose(
+                midpoint,
+                quaternion,
+                new THREE.Vector3(1, 1, 1)
+            );
+        }
+
         function updateInput(frame) {
             const xrSession = renderer.xr.getSession();
             const elapsedTime = clock.getDelta();
@@ -463,120 +462,53 @@
                 return;
             }
 
-            // Set up hit-test source once (downward ray from first controller's grip)
-            if (!hitTestSourceRequested && frame) {
-                for (let i = 0; i < xrSession.inputSources.length; i++) {
-                    const inputSource = xrSession.inputSources[i];
-                    if (inputSource.gripSpace) {
-                        const offsetRay = new XRRay(
-                            { x: 0, y: 0, z: 0, w: 1.0 },
-                            { x: 0, y: -1.0, z: 0, w: 0.0 }
-                        );
-                        xrSession.requestHitTestSource({
-                            space: inputSource.gripSpace,
-                            offsetRay: offsetRay
-                        }).then((source) => {
-                            hitTestSource = source;
-                        }).catch(() => {
-                            // Hit-test not available, will use offset fallback
-                        });
-
-                        xrSession.addEventListener('end', () => {
-                            hitTestSourceRequested = false;
-                            hitTestSource = null;
-                        });
-                        hitTestSourceRequested = true;
-                        break;
-                    }
-                }
-            }
+            let bothGripsPressed = true;
+            let controllerPositions = [];
+            let controllerQuaternions = [];
+            let validControllerCount = 0;
 
             for (let i = 0; i < xrSession.inputSources.length; i++) {
                 const input = xrSession.inputSources[i];
-                const gamepad = input.gamepad; 
+                const gamepad = input.gamepad;
 
                 if (
-                    gamepad != null && 
+                    gamepad != null &&
                     gamepad.mapping == "xr-standard" &&
                     gamepad.axes.length >= 4
                 ) {
-                    const horizontal = gamepad.axes[2]; // Primary thumbstick X
-                    const vertical = gamepad.axes[3]; // Primary thumbstick Y
+                    validControllerCount++;
 
-                    const triggerButton = gamepad.buttons[0];
+                    const horizontal = gamepad.axes[2];
+                    const vertical = gamepad.axes[3];
+
                     const gripButton = gamepad.buttons[1];
                     const axButton = gamepad.buttons[4];
                     const byButton = gamepad.buttons[5];
 
-                    if (gripButton.pressed && isCalibrated) {
-                        // Grip held: thumbstick vertical adjusts surface height
-                        if (vertical > 0.7) {
-                            surfaceY -= 0.5 * elapsedTime;
-                        } else if (vertical < -0.7) {
-                            surfaceY += 0.5 * elapsedTime;
-                        }
-                    } else {
+                    if (!gripButton.pressed) {
+                        bothGripsPressed = false;
+                    }
+
+                    // Thumbstick controls (only when not grabbing)
+                    if (!isGrabbing) {
                         if (vertical > 0.7) {
                             incrementScale(-1.0 * elapsedTime);
                         } else if (vertical < -0.7) {
                             incrementScale(1.0 * elapsedTime);
                         }
-                    }
 
-                    if (horizontal > 0.7) {
-                        incrementOpacity(1.0 * elapsedTime);
-                    } else if (horizontal < -0.7) {
-                        incrementOpacity(-1.0 * elapsedTime);
-                    }
-
-                    // FIXME: This index won't match the correct controller
-                    // if a disconnection happens during the session.
-                    const controllerToUse = renderer.xr.getController(i);
-
-                    // Calibrate: press grip while controller rests on the drawing surface
-                    if (gripButton.pressed && !didPressGripPrev) {
-                        let calibratedFromHitTest = false;
-
-                        // Try hit-test first for accurate surface detection
-                        if (hitTestSource && frame) {
-                            const referenceSpace = renderer.xr.getReferenceSpace();
-                            const hitResults = frame.getHitTestResults(hitTestSource);
-                            if (hitResults.length > 0) {
-                                const hitPose = hitResults[0].getPose(referenceSpace);
-                                if (hitPose) {
-                                    surfaceY = hitPose.transform.position.y;
-                                    calibratedFromHitTest = true;
-                                }
-                            }
-                        }
-
-                        // Fallback: grip world position minus offset for controller thickness
-                        if (!calibratedFromHitTest) {
-                            surfaceY = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0)).y - GRIP_TO_SURFACE_OFFSET;
-                        }
-
-                        isCalibrated = true;
-                    }
-                    didPressGripPrev = gripButton.pressed;
-
-                    if (triggerButton.pressed) {
-                        if (isCalibrated) {
-                            // Project controller XZ onto the calibrated surface plane
-                            const worldPos = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0));
-                            group.position.set(worldPos.x, surfaceY, worldPos.z);
-
-                            // Lay image flat on surface, rotated by controller yaw
-                            const worldQuat = new THREE.Quaternion();
-                            controllerToUse.getWorldQuaternion(worldQuat);
-                            const euler = new THREE.Euler().setFromQuaternion(worldQuat, 'YXZ');
-                            group.rotation.set(-Math.PI / 2, euler.y, 0);
-                        } else {
-                            // Original behavior before calibration
-                            const offsetPosition = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0.045));
-                            group.position.copy(offsetPosition);
-                            group.setRotationFromQuaternion(controllerToUse.quaternion);
+                        if (horizontal > 0.7) {
+                            incrementOpacity(1.0 * elapsedTime);
+                        } else if (horizontal < -0.7) {
+                            incrementOpacity(-1.0 * elapsedTime);
                         }
                     }
+
+                    const controllerObj = renderer.xr.getController(i);
+                    controllerPositions.push(controllerObj.localToWorld(new THREE.Vector3(0, 0, 0)));
+                    const worldQuat = new THREE.Quaternion();
+                    controllerObj.getWorldQuaternion(worldQuat);
+                    controllerQuaternions.push(worldQuat);
 
                     if (axButton.pressed) {
                         didPressHideImage = true;
@@ -586,6 +518,51 @@
                         didPressHideInstructions = true;
                     }
                 }
+            }
+
+            bothGripsPressed = bothGripsPressed && validControllerCount >= 2 && controllerPositions.length >= 2;
+
+            if (bothGripsPressed) {
+                const c1 = controllerPositions[0];
+                const c2 = controllerPositions[1];
+
+                if (!isGrabbing) {
+                    // Grab start
+                    isGrabbing = true;
+                    grabStartDistance = c1.distanceTo(c2);
+                    grabStartScale = currentScale;
+
+                    const grabMatrix = computeGrabMatrix(c1, c2, controllerQuaternions[0], controllerQuaternions[1]);
+                    const grabMatrixInverse = grabMatrix.clone().invert();
+                    const objectMatrix = new THREE.Matrix4().compose(
+                        group.position,
+                        group.quaternion,
+                        new THREE.Vector3(1, 1, 1)
+                    );
+                    grabLocalMatrix = grabMatrixInverse.multiply(objectMatrix);
+                } else {
+                    // Grab update
+                    const newGrabMatrix = computeGrabMatrix(c1, c2, controllerQuaternions[0], controllerQuaternions[1]);
+                    const newObjectMatrix = newGrabMatrix.clone().multiply(grabLocalMatrix);
+
+                    const pos = new THREE.Vector3();
+                    const quat = new THREE.Quaternion();
+                    const scl = new THREE.Vector3();
+                    newObjectMatrix.decompose(pos, quat, scl);
+
+                    group.position.copy(pos);
+                    group.quaternion.copy(quat);
+
+                    // Scale from controller distance
+                    const newDistance = c1.distanceTo(c2);
+                    if (grabStartDistance > 0.01) {
+                        currentScale = grabStartScale * (newDistance / grabStartDistance);
+                        currentScale = Math.min(Math.max(currentScale, 0.01), 4.0);
+                        group.scale.setScalar(currentScale);
+                    }
+                }
+            } else {
+                isGrabbing = false;
             }
 
             const shouldChangeInstructionsVisibility = (!didPressHideInstructions && previousDidPressHideInstructions);
