@@ -93,17 +93,19 @@
 
             float sobelResult = clamp(sqrt(horizontal * horizontal + vertical * vertical) * 2.5, 0.0, 1.0);
 
-            vec4 sobelColor = vec4(1.0 - sobelResult, 1.0 - sobelResult, 1.0 - sobelResult, sobelResult);
+            vec3 sobelRGB = vec3(1.0 - sobelResult);
             vec4 currentColor = texture2D(colorTexture, uv);
 
-            float smoothOpacity = smoothstep(0.0, 0.8, opacity);
+            // Two-zone opacity control:
+            // opacity 0.0-0.4: visibility fades from transparent to edges-only
+            // opacity 0.4-0.9: blend from edges-only to full original image
+            float visibility = smoothstep(0.0, 0.4, opacity);
+            float imageBlend = smoothstep(0.4, 0.9, opacity);
 
-            gl_FragColor = vec4(
-                currentColor.x * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.x,
-                currentColor.y * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.y,
-                currentColor.z * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.z,
-                max(smoothOpacity, (1.0 - smoothOpacity) * sobelColor.w)
-            );
+            vec3 rgb = mix(sobelRGB, currentColor.rgb, imageBlend);
+            float alpha = mix(sobelResult, 1.0, imageBlend) * visibility;
+
+            gl_FragColor = vec4(rgb, alpha);
         }
         </script>
 
@@ -476,9 +478,9 @@
                     if (gripButton.pressed && isCalibrated) {
                         // Grip held: thumbstick vertical adjusts surface height
                         if (vertical > 0.7) {
-                            surfaceY -= 0.05 * elapsedTime;
+                            surfaceY -= 0.5 * elapsedTime;
                         } else if (vertical < -0.7) {
-                            surfaceY += 0.05 * elapsedTime;
+                            surfaceY += 0.5 * elapsedTime;
                         }
                     } else {
                         if (vertical > 0.7) {
@@ -500,7 +502,7 @@
 
                     // Calibrate: press grip while controller rests on the drawing surface
                     if (gripButton.pressed && !didPressGripPrev) {
-                        surfaceY = controllerToUse.position.y;
+                        surfaceY = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0)).y;
                         isCalibrated = true;
                     }
                     didPressGripPrev = gripButton.pressed;
@@ -512,7 +514,9 @@
                             group.position.set(worldPos.x, surfaceY, worldPos.z);
 
                             // Lay image flat on surface, rotated by controller yaw
-                            const euler = new THREE.Euler().setFromQuaternion(controllerToUse.quaternion, 'YXZ');
+                            const worldQuat = new THREE.Quaternion();
+                            controllerToUse.getWorldQuaternion(worldQuat);
+                            const euler = new THREE.Euler().setFromQuaternion(worldQuat, 'YXZ');
                             group.rotation.set(-Math.PI / 2, euler.y, 0);
                         } else {
                             // Original behavior before calibration
