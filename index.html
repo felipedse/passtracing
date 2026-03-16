@@ -133,6 +133,9 @@
         let surfaceY = 0;
         let isCalibrated = false;
         let didPressGripPrev = false;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+        const GRIP_TO_SURFACE_OFFSET = 0.04; // ~4cm from grip center to controller bottom
 
         init();
         animate();
@@ -291,7 +294,7 @@
                 }),
 
                 new ThreeMeshUI.Text({
-                    content: "Set surface plane",
+                    content: "Detect surface plane",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
@@ -374,7 +377,9 @@
                 url,
 
                 function (texture) {
-                    document.body.appendChild(ARButton.createButton(renderer));
+                    document.body.appendChild(ARButton.createButton(renderer, {
+                        optionalFeatures: ['hit-test']
+                    }));
 
                     let originalWidth = texture.image.width;
                     let originalHeight = texture.image.height;
@@ -441,13 +446,13 @@
             renderer.setAnimationLoop(loop);
         }
 
-        function loop() {
-            updateInput();
+        function loop(timestamp, frame) {
+            updateInput(frame);
             ThreeMeshUI.update();
             renderer.render(scene, camera);
         }
 
-        function updateInput() {
+        function updateInput(frame) {
             const xrSession = renderer.xr.getSession();
             const elapsedTime = clock.getDelta();
 
@@ -456,6 +461,34 @@
 
             if (xrSession == null || xrSession.inputSources.length <= 0) {
                 return;
+            }
+
+            // Set up hit-test source once (downward ray from first controller's grip)
+            if (!hitTestSourceRequested && frame) {
+                for (let i = 0; i < xrSession.inputSources.length; i++) {
+                    const inputSource = xrSession.inputSources[i];
+                    if (inputSource.gripSpace) {
+                        const offsetRay = new XRRay(
+                            { x: 0, y: 0, z: 0, w: 1.0 },
+                            { x: 0, y: -1.0, z: 0, w: 0.0 }
+                        );
+                        xrSession.requestHitTestSource({
+                            space: inputSource.gripSpace,
+                            offsetRay: offsetRay
+                        }).then((source) => {
+                            hitTestSource = source;
+                        }).catch(() => {
+                            // Hit-test not available, will use offset fallback
+                        });
+
+                        xrSession.addEventListener('end', () => {
+                            hitTestSourceRequested = false;
+                            hitTestSource = null;
+                        });
+                        hitTestSourceRequested = true;
+                        break;
+                    }
+                }
             }
 
             for (let i = 0; i < xrSession.inputSources.length; i++) {
@@ -502,7 +535,26 @@
 
                     // Calibrate: press grip while controller rests on the drawing surface
                     if (gripButton.pressed && !didPressGripPrev) {
-                        surfaceY = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0)).y;
+                        let calibratedFromHitTest = false;
+
+                        // Try hit-test first for accurate surface detection
+                        if (hitTestSource && frame) {
+                            const referenceSpace = renderer.xr.getReferenceSpace();
+                            const hitResults = frame.getHitTestResults(hitTestSource);
+                            if (hitResults.length > 0) {
+                                const hitPose = hitResults[0].getPose(referenceSpace);
+                                if (hitPose) {
+                                    surfaceY = hitPose.transform.position.y;
+                                    calibratedFromHitTest = true;
+                                }
+                            }
+                        }
+
+                        // Fallback: grip world position minus offset for controller thickness
+                        if (!calibratedFromHitTest) {
+                            surfaceY = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0)).y - GRIP_TO_SURFACE_OFFSET;
+                        }
+
                         isCalibrated = true;
                     }
                     didPressGripPrev = gripButton.pressed;
