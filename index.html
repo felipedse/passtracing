@@ -69,12 +69,13 @@
         varying vec2 vUv;
 
         float intensity(in vec4 color) {
-            return sqrt((color.x*color.x)+(color.y*color.y)+(color.z*color.z));
+            float raw = sqrt((color.x*color.x)+(color.y*color.y)+(color.z*color.z)) / 1.732;
+            return pow(raw, 0.4);
         }
 
         void main() {
             vec2 uv = vUv;
-            
+
             ivec2 imageSize = textureSize(colorTexture, 0);
             vec2 step = vec2(stepSize/float(imageSize.x), stepSize/float(imageSize.y));
 
@@ -86,16 +87,16 @@
             float topRight    = intensity(texture2D(colorTexture, uv + vec2(step.x, step.y)));
             float right       = intensity(texture2D(colorTexture, uv + vec2(step.x, 0)));
             float bottomRight = intensity(texture2D(colorTexture, uv + vec2(step.x, -step.y)));
-         
+
             float horizontal = topLeft + 2.0 * left + bottomLeft - topRight - 2.0 * right - bottomRight;
             float vertical = -topLeft - 2.0 * top - topRight + bottomLeft + 2.0 * bottom + bottomRight;
 
-            float sobelResult = sqrt(horizontal * horizontal + vertical * vertical);
+            float sobelResult = clamp(sqrt(horizontal * horizontal + vertical * vertical) * 2.5, 0.0, 1.0);
 
             vec4 sobelColor = vec4(1.0 - sobelResult, 1.0 - sobelResult, 1.0 - sobelResult, sobelResult);
             vec4 currentColor = texture2D(colorTexture, uv);
 
-            float smoothOpacity = smoothstep(0.0, 0.3, opacity);
+            float smoothOpacity = smoothstep(0.0, 0.8, opacity);
 
             gl_FragColor = vec4(
                 currentColor.x * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.x,
@@ -127,9 +128,9 @@
         let currentScale = 1.0;
         let previousDidPressHideImage = false;
         let previousDidPressHideInstructions = false;
-        let calibrationOffsetY = 0;
+        let surfaceY = 0;
         let isCalibrated = false;
-        let previousDidPressGrip = false;
+        let didPressGripPrev = false;
 
         init();
         animate();
@@ -288,7 +289,19 @@
                 }),
 
                 new ThreeMeshUI.Text({
-                    content: "Calibrate offset",
+                    content: "Set surface plane",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffffff)
+                }),
+
+                new ThreeMeshUI.Text({
+                    content: "\nGrip + analog up/down: ",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffff00)
+                }),
+
+                new ThreeMeshUI.Text({
+                    content: "Adjust height",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
@@ -300,7 +313,7 @@
                 }),
 
                 new ThreeMeshUI.Text({
-                    content: "Reposition image",
+                    content: "Move image on surface",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
@@ -460,10 +473,19 @@
                     const axButton = gamepad.buttons[4];
                     const byButton = gamepad.buttons[5];
 
-                    if (vertical > 0.7) {
-                        incrementScale(-1.0 * elapsedTime);
-                    } else if (vertical < -0.7) {
-                        incrementScale(1.0 * elapsedTime);
+                    if (gripButton.pressed && isCalibrated) {
+                        // Grip held: thumbstick vertical adjusts surface height
+                        if (vertical > 0.7) {
+                            surfaceY -= 0.05 * elapsedTime;
+                        } else if (vertical < -0.7) {
+                            surfaceY += 0.05 * elapsedTime;
+                        }
+                    } else {
+                        if (vertical > 0.7) {
+                            incrementScale(-1.0 * elapsedTime);
+                        } else if (vertical < -0.7) {
+                            incrementScale(1.0 * elapsedTime);
+                        }
                     }
 
                     if (horizontal > 0.7) {
@@ -476,20 +498,28 @@
                     // if a disconnection happens during the session.
                     const controllerToUse = renderer.xr.getController(i);
 
-                    // Calibrate: press grip while controller is resting on the surface
-                    if (gripButton.pressed && !previousDidPressGrip) {
-                        calibrationOffsetY = controllerToUse.position.y;
+                    // Calibrate: press grip while controller rests on the drawing surface
+                    if (gripButton.pressed && !didPressGripPrev) {
+                        surfaceY = controllerToUse.position.y;
                         isCalibrated = true;
                     }
-                    previousDidPressGrip = gripButton.pressed;
+                    didPressGripPrev = gripButton.pressed;
 
                     if (triggerButton.pressed) {
-                        const offsetPosition = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0.045));
                         if (isCalibrated) {
-                            offsetPosition.y -= (controllerToUse.position.y - calibrationOffsetY);
+                            // Project controller XZ onto the calibrated surface plane
+                            const worldPos = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0));
+                            group.position.set(worldPos.x, surfaceY, worldPos.z);
+
+                            // Lay image flat on surface, rotated by controller yaw
+                            const euler = new THREE.Euler().setFromQuaternion(controllerToUse.quaternion, 'YXZ');
+                            group.rotation.set(-Math.PI / 2, euler.y, 0);
+                        } else {
+                            // Original behavior before calibration
+                            const offsetPosition = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0.045));
+                            group.position.copy(offsetPosition);
+                            group.setRotationFromQuaternion(controllerToUse.quaternion);
                         }
-                        group.position.copy(offsetPosition);
-                        group.setRotationFromQuaternion(controllerToUse.quaternion);
                     }
 
                     if (axButton.pressed) {
