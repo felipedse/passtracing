@@ -101,7 +101,7 @@
                 currentColor.x * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.x,
                 currentColor.y * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.y,
                 currentColor.z * smoothOpacity + (1.0 - smoothOpacity) * sobelColor.z,
-                currentColor.w * min(opacity, smoothOpacity) + (1.0 - smoothOpacity) * sobelColor.w
+                max(smoothOpacity, (1.0 - smoothOpacity) * sobelColor.w)
             );
         }
         </script>
@@ -127,6 +127,9 @@
         let currentScale = 1.0;
         let previousDidPressHideImage = false;
         let previousDidPressHideInstructions = false;
+        let calibrationOffsetY = 0;
+        let isCalibrated = false;
+        let previousDidPressGrip = false;
 
         init();
         animate();
@@ -279,7 +282,19 @@
 
 
                 new ThreeMeshUI.Text({
-                    content: "\n\nHold trigger: ",
+                    content: "\n\nGrip (on surface): ",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffff00)
+                }),
+
+                new ThreeMeshUI.Text({
+                    content: "Calibrate offset",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffffff)
+                }),
+
+                new ThreeMeshUI.Text({
+                    content: "\nHold trigger: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
@@ -441,6 +456,7 @@
                     const vertical = gamepad.axes[3]; // Primary thumbstick Y
 
                     const triggerButton = gamepad.buttons[0];
+                    const gripButton = gamepad.buttons[1];
                     const axButton = gamepad.buttons[4];
                     const byButton = gamepad.buttons[5];
 
@@ -460,8 +476,18 @@
                     // if a disconnection happens during the session.
                     const controllerToUse = renderer.xr.getController(i);
 
+                    // Calibrate: press grip while controller is resting on the surface
+                    if (gripButton.pressed && !previousDidPressGrip) {
+                        calibrationOffsetY = controllerToUse.position.y;
+                        isCalibrated = true;
+                    }
+                    previousDidPressGrip = gripButton.pressed;
+
                     if (triggerButton.pressed) {
                         const offsetPosition = controllerToUse.localToWorld(new THREE.Vector3(0, 0, 0.045));
+                        if (isCalibrated) {
+                            offsetPosition.y -= (controllerToUse.position.y - calibrationOffsetY);
+                        }
                         group.position.copy(offsetPosition);
                         group.setRotationFromQuaternion(controllerToUse.quaternion);
                     }
