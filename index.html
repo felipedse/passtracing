@@ -96,9 +96,6 @@
             vec3 sobelRGB = vec3(1.0 - sobelResult);
             vec4 currentColor = texture2D(colorTexture, uv);
 
-            // Two-zone opacity control:
-            // opacity 0.0-0.4: visibility fades from transparent to edges-only
-            // opacity 0.4-0.9: blend from edges-only to full original image
             float visibility = smoothstep(0.0, 0.4, opacity);
             float imageBlend = smoothstep(0.4, 0.9, opacity);
 
@@ -130,10 +127,28 @@
         let currentScale = 1.0;
         let previousDidPressHideImage = false;
         let previousDidPressHideInstructions = false;
-        let isGrabbing = false;
-        let grabLocalMatrix = null;
-        let grabStartDistance = 0;
-        let grabStartScale = 1.0;
+
+        // ============================================================
+        // DELTA-BASED GRAB STATE
+        // Instead of computing absolute rotation each frame, we track
+        // the CHANGE between frames and apply it to the object.
+        // ============================================================
+
+        // Two-hand grab state
+        let isTwoHandGrabbing = false;
+        let prevGrabMidpoint = null;
+        let prevGrabQuat = null;
+        let prevGrabDistance = 0;
+
+        // Single-hand grab state (trigger on either controller)
+        let singleGrabControllerIndex = -1;
+        let prevSingleGrabPos = null;
+        let prevSingleGrabQuat = null;
+
+        // Hit-test state
+        let hitTestSource = null;
+        let hitTestReticle = null;
+        let hitTestPose = null;
 
         init();
         animate();
@@ -153,7 +168,6 @@
             clock = new THREE.Clock();
 
             // Renderer
-
             renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
             renderer.setPixelRatio(window.devicePixelRatio);
             renderer.setSize(window.innerWidth, window.innerHeight);
@@ -164,23 +178,32 @@
             container.appendChild(renderer.domElement);
 
             // Controllers
-
             controller1 = renderer.xr.getController(0);
             scene.add(controller1);
 
             controller2 = renderer.xr.getController(1);
             scene.add(controller2);
 
-            // UI
+            // Hit-test reticle (green ring on detected surfaces)
+            const reticleGeometry = new THREE.RingGeometry(0.04, 0.05, 32).rotateX(-Math.PI / 2);
+            const reticleMaterial = new THREE.MeshBasicMaterial({
+                color: 0x00ff88,
+                transparent: true,
+                opacity: 0.6,
+                side: THREE.DoubleSide
+            });
+            hitTestReticle = new THREE.Mesh(reticleGeometry, reticleMaterial);
+            hitTestReticle.visible = false;
+            hitTestReticle.matrixAutoUpdate = false;
+            scene.add(hitTestReticle);
 
+            // UI
             makeInstructionsUI();
 
             // Load image
-
             const length = 0.25;
             group = new THREE.Group();
             group.position.set(0, 0, -0.5);
-
             scene.add(group);
 
             const url = new URL(window.location);
@@ -199,16 +222,13 @@
             }
 
             // Resize event
-
             window.addEventListener('resize', onWindowResize);
 
             // URL Input
-
             const inputLink = document.getElementById("urlInputLink");
             inputLink.onclick = changeImageUrl;
 
             // Send to Quest
-
             const sendToQuestLink = document.getElementById("urlToQuestLink");
             sendToQuestLink.onclick = sendUrlToQuest;
         }
@@ -217,7 +237,7 @@
             const textContainer = new ThreeMeshUI.Block({
                 borderRadius: 0.05,
                 width: 0.45,
-                height: 0.60,
+                height: 0.68,
                 padding: 0.05,
                 textAlign: 'left',
                 fontKerning: 'none',
@@ -235,86 +255,81 @@
                     fontSize: 0.04,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "\nAnalog right: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "Increase opacity",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "\nAnalog left: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "Decrease opacity",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "\n\nAnalog up: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "Increase size",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "\nAnalog down: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "Decrease size",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
-
                 new ThreeMeshUI.Text({
-                    content: "\n\nBoth grips: ",
+                    content: "\n\nTrigger: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
-                    content: "Grab and move image",
+                    content: "Grab with one hand",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
+                new ThreeMeshUI.Text({
+                    content: "\nBoth grips: ",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffff00)
+                }),
+                new ThreeMeshUI.Text({
+                    content: "Grab + rotate + scale",
+                    fontSize: 0.025,
+                    fontColor: new THREE.Color(0xffffff)
+                }),
                 new ThreeMeshUI.Text({
                     content: "\n\nA or X: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
-                    content: "Show/Hide image",
+                    content: "Snap to surface / Show-Hide",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffffff)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "\nB or Y: ",
                     fontSize: 0.025,
                     fontColor: new THREE.Color(0xffff00)
                 }),
-
                 new ThreeMeshUI.Text({
                     content: "Show/Hide instructions",
                     fontSize: 0.025,
@@ -344,14 +359,35 @@
         }
 
         function loadTexture(container, length, url) {
-
             const loader = new THREE.TextureLoader();
 
             loader.load(
                 url,
-
                 function (texture) {
-                    document.body.appendChild(ARButton.createButton(renderer));
+                    // Request hit-test as optional feature
+                    const sessionInit = {
+                        requiredFeatures: ['local-floor'],
+                        optionalFeatures: ['hit-test']
+                    };
+
+                    const arButton = ARButton.createButton(renderer, sessionInit);
+                    document.body.appendChild(arButton);
+
+                    // Setup hit-test when XR session starts
+                    renderer.xr.addEventListener('sessionstart', async () => {
+                        const session = renderer.xr.getSession();
+                        try {
+                            const viewerSpace = await session.requestReferenceSpace('viewer');
+                            hitTestSource = await session.requestHitTestSource({ space: viewerSpace });
+                        } catch (e) {
+                            console.log('Hit-test not available:', e);
+                            hitTestSource = null;
+                        }
+                    });
+
+                    renderer.xr.addEventListener('sessionend', () => {
+                        hitTestSource = null;
+                    });
 
                     let originalWidth = texture.image.width;
                     let originalHeight = texture.image.height;
@@ -361,7 +397,6 @@
                     let height = (originalHeight/max) * length;
 
                     const geometry = new THREE.PlaneGeometry(width, height);
-
                     texture.generateMipmaps = false;
 
                     const sobelMaterial = new THREE.ShaderMaterial({
@@ -376,12 +411,9 @@
                     });
 
                     imagePlane = new THREE.Mesh(geometry, sobelMaterial);
-
                     container.add(imagePlane);
                 },
-
                 undefined,
-
                 function (err) {
                     alert("Unable to load image, try a different URL.\n\nCross-Origin Resource Sharing (CORS) policies might prevent the app from loading images from certain websites.");
                 }
@@ -391,7 +423,6 @@
         function incrementOpacity(delta) {
             currentOpacity += delta;
             currentOpacity = Math.min(Math.max(currentOpacity, 0.0), 1.0);
-
             if (imagePlane != null) {
                 imagePlane.material.uniforms["opacity"].value = currentOpacity;
             }
@@ -399,10 +430,9 @@
 
         function incrementScale(delta) {
             currentScale += delta;
-            currentScale = Math.min(Math.max(currentScale, 0.0), 4.0);
-
+            currentScale = Math.min(Math.max(currentScale, 0.01), 4.0);
             if (group != null) {
-                group.scale.set(currentScale, currentScale, currentScale);
+                group.scale.setScalar(currentScale);
             }
         }
 
@@ -412,44 +442,215 @@
             renderer.setSize( window.innerWidth, window.innerHeight );
         }
 
-        //
-
         function animate() {
             renderer.setAnimationLoop(loop);
         }
 
         function loop(timestamp, frame) {
+            updateHitTest(frame);
             updateInput(frame);
             ThreeMeshUI.update();
             renderer.render(scene, camera);
         }
 
-        function computeGrabMatrix(c1Pos, c2Pos, c1Quat, c2Quat) {
-            const midpoint = c1Pos.clone().add(c2Pos).multiplyScalar(0.5);
-            const direction = c2Pos.clone().sub(c1Pos).normalize();
+        // ============================================================
+        // HIT-TEST: detect real surfaces and show reticle
+        // ============================================================
 
-            // Average "up" from both controllers for full 3-axis rotation
-            const up1 = new THREE.Vector3(0, 1, 0).applyQuaternion(c1Quat);
-            const up2 = new THREE.Vector3(0, 1, 0).applyQuaternion(c2Quat);
-            const avgUp = up1.add(up2).normalize();
-
-            let forward = new THREE.Vector3().crossVectors(avgUp, direction);
-            if (forward.lengthSq() < 0.001) {
-                forward.set(0, 0, 1);
+        function updateHitTest(frame) {
+            if (!frame || !hitTestSource) {
+                hitTestReticle.visible = false;
+                return;
             }
-            forward.normalize();
 
-            const correctedUp = new THREE.Vector3().crossVectors(direction, forward).normalize();
+            const refSpace = renderer.xr.getReferenceSpace();
+            const results = frame.getHitTestResults(hitTestSource);
 
-            const rotMatrix = new THREE.Matrix4().makeBasis(direction, correctedUp, forward);
-            const quaternion = new THREE.Quaternion().setFromRotationMatrix(rotMatrix);
-
-            return new THREE.Matrix4().compose(
-                midpoint,
-                quaternion,
-                new THREE.Vector3(1, 1, 1)
-            );
+            if (results.length > 0) {
+                const hit = results[0];
+                const pose = hit.getPose(refSpace);
+                if (pose) {
+                    hitTestReticle.visible = true;
+                    hitTestReticle.matrix.fromArray(pose.transform.matrix);
+                    hitTestPose = pose;
+                } else {
+                    hitTestReticle.visible = false;
+                    hitTestPose = null;
+                }
+            } else {
+                hitTestReticle.visible = false;
+                hitTestPose = null;
+            }
         }
+
+        // ============================================================
+        // SNAP TO SURFACE: place image flat on detected surface
+        // ============================================================
+
+        function snapToSurface() {
+            if (!hitTestPose || !group) return false;
+
+            const matrix = new THREE.Matrix4().fromArray(hitTestPose.transform.matrix);
+            const pos = new THREE.Vector3();
+            const quat = new THREE.Quaternion();
+            const scl = new THREE.Vector3();
+            matrix.decompose(pos, quat, scl);
+
+            // Offset slightly above the surface to prevent z-fighting
+            pos.y += 0.002;
+            group.position.copy(pos);
+            group.quaternion.copy(quat);
+
+            // Lay the plane flat on the surface.
+            // Hit-test Y = surface normal, so rotate -90deg around X
+            const layFlat = new THREE.Quaternion().setFromAxisAngle(
+                new THREE.Vector3(1, 0, 0), -Math.PI / 2
+            );
+            group.quaternion.multiply(layFlat);
+
+            return true;
+        }
+
+        // ============================================================
+        // HELPER: Get controller world position and quaternion
+        // In WebXR, controller.position can be stale. Always use these.
+        // ============================================================
+
+        function getControllerWorldPos(index) {
+            const c = renderer.xr.getController(index);
+            return c.localToWorld(new THREE.Vector3(0, 0, 0));
+        }
+
+        function getControllerWorldQuat(index) {
+            const c = renderer.xr.getController(index);
+            const q = new THREE.Quaternion();
+            c.getWorldQuaternion(q);
+            return q;
+        }
+
+        // ============================================================
+        // DELTA-BASED TWO-HAND GRAB
+        //
+        // Key insight: instead of computing "where should the image be"
+        // from scratch each frame, we compute "how did the hands change
+        // since last frame" and apply that delta to the current pose.
+        //
+        // This captures ALL rotations faithfully (pitch, yaw, roll)
+        // because we use the average quaternion of both controllers
+        // directly via SLERP, rather than trying to construct rotation
+        // from axis vectors (which was the root cause of the old bug).
+        // ============================================================
+
+        function computeTwoHandPose(c1Pos, c2Pos, c1Quat, c2Quat) {
+            const midpoint = c1Pos.clone().add(c2Pos).multiplyScalar(0.5);
+
+            // SLERP at 0.5 = average orientation of both hands.
+            // Directly captures actual tilt/pitch/roll.
+            const avgQuat = c1Quat.clone().slerp(c2Quat, 0.5);
+
+            const distance = c1Pos.distanceTo(c2Pos);
+
+            return { midpoint, quat: avgQuat, distance };
+        }
+
+        function updateTwoHandGrab(c1Pos, c2Pos, c1Quat, c2Quat) {
+            const current = computeTwoHandPose(c1Pos, c2Pos, c1Quat, c2Quat);
+
+            if (!isTwoHandGrabbing) {
+                // === GRAB START ===
+                isTwoHandGrabbing = true;
+                prevGrabMidpoint = current.midpoint.clone();
+                prevGrabQuat = current.quat.clone();
+                prevGrabDistance = current.distance;
+                return;
+            }
+
+            // === GRAB UPDATE: compute delta and apply ===
+
+            // 1. TRANSLATION DELTA
+            const deltaPos = current.midpoint.clone().sub(prevGrabMidpoint);
+            group.position.add(deltaPos);
+
+            // 2. ROTATION DELTA
+            // deltaQuat = current * inverse(previous)
+            // = "how much did the hands rotate since last frame"
+            const prevQuatInv = prevGrabQuat.clone().invert();
+            const deltaQuat = current.quat.clone().multiply(prevQuatInv);
+
+            // Apply rotation around the grab midpoint (natural pivot)
+            const pivot = current.midpoint;
+            const objToPivot = group.position.clone().sub(pivot);
+            objToPivot.applyQuaternion(deltaQuat);
+            group.position.copy(pivot).add(objToPivot);
+            group.quaternion.premultiply(deltaQuat);
+
+            // 3. SCALE DELTA (pinch-to-zoom)
+            if (prevGrabDistance > 0.01 && current.distance > 0.01) {
+                const scaleRatio = current.distance / prevGrabDistance;
+                currentScale *= scaleRatio;
+                currentScale = Math.min(Math.max(currentScale, 0.01), 4.0);
+                group.scale.setScalar(currentScale);
+            }
+
+            // Store for next frame
+            prevGrabMidpoint = current.midpoint.clone();
+            prevGrabQuat = current.quat.clone();
+            prevGrabDistance = current.distance;
+        }
+
+        function endTwoHandGrab() {
+            isTwoHandGrabbing = false;
+            prevGrabMidpoint = null;
+            prevGrabQuat = null;
+            prevGrabDistance = 0;
+        }
+
+        // ============================================================
+        // SINGLE-HAND GRAB (trigger button)
+        //
+        // Press trigger with one hand to grab and move/rotate the image.
+        // Uses the same delta technique — tracks the controller's
+        // quaternion change frame-to-frame and applies it directly.
+        // ============================================================
+
+        function updateSingleHandGrab(controllerIndex) {
+            const pos = getControllerWorldPos(controllerIndex);
+            const quat = getControllerWorldQuat(controllerIndex);
+
+            if (singleGrabControllerIndex !== controllerIndex) {
+                // === GRAB START ===
+                singleGrabControllerIndex = controllerIndex;
+                prevSingleGrabPos = pos.clone();
+                prevSingleGrabQuat = quat.clone();
+                return;
+            }
+
+            // === GRAB UPDATE ===
+            const deltaPos = pos.clone().sub(prevSingleGrabPos);
+            group.position.add(deltaPos);
+
+            const prevQuatInv = prevSingleGrabQuat.clone().invert();
+            const deltaQuat = quat.clone().multiply(prevQuatInv);
+
+            const pivot = pos;
+            const objToPivot = group.position.clone().sub(pivot);
+            objToPivot.applyQuaternion(deltaQuat);
+            group.position.copy(pivot).add(objToPivot);
+            group.quaternion.premultiply(deltaQuat);
+
+            prevSingleGrabPos = pos.clone();
+            prevSingleGrabQuat = quat.clone();
+        }
+
+        function endSingleHandGrab() {
+            singleGrabControllerIndex = -1;
+            prevSingleGrabPos = null;
+            prevSingleGrabQuat = null;
+        }
+
+        // ============================================================
+        // INPUT PROCESSING
+        // ============================================================
 
         function updateInput(frame) {
             const xrSession = renderer.xr.getSession();
@@ -466,6 +667,7 @@
             let controllerPositions = [];
             let controllerQuaternions = [];
             let validControllerCount = 0;
+            let triggerControllerIndex = -1;
 
             for (let i = 0; i < xrSession.inputSources.length; i++) {
                 const input = xrSession.inputSources[i];
@@ -481,6 +683,7 @@
                     const horizontal = gamepad.axes[2];
                     const vertical = gamepad.axes[3];
 
+                    const triggerButton = gamepad.buttons[0];
                     const gripButton = gamepad.buttons[1];
                     const axButton = gamepad.buttons[4];
                     const byButton = gamepad.buttons[5];
@@ -489,8 +692,13 @@
                         bothGripsPressed = false;
                     }
 
+                    // Track trigger for single-hand grab
+                    if (triggerButton.pressed) {
+                        triggerControllerIndex = i;
+                    }
+
                     // Thumbstick controls (only when not grabbing)
-                    if (!isGrabbing) {
+                    if (!isTwoHandGrabbing && singleGrabControllerIndex < 0) {
                         if (vertical > 0.7) {
                             incrementScale(-1.0 * elapsedTime);
                         } else if (vertical < -0.7) {
@@ -504,11 +712,8 @@
                         }
                     }
 
-                    const controllerObj = renderer.xr.getController(i);
-                    controllerPositions.push(controllerObj.localToWorld(new THREE.Vector3(0, 0, 0)));
-                    const worldQuat = new THREE.Quaternion();
-                    controllerObj.getWorldQuaternion(worldQuat);
-                    controllerQuaternions.push(worldQuat);
+                    controllerPositions.push(getControllerWorldPos(i));
+                    controllerQuaternions.push(getControllerWorldQuat(i));
 
                     if (axButton.pressed) {
                         didPressHideImage = true;
@@ -522,61 +727,47 @@
 
             bothGripsPressed = bothGripsPressed && validControllerCount >= 2 && controllerPositions.length >= 2;
 
+            // === PRIORITY: Two-hand grab > Single-hand grab ===
+
             if (bothGripsPressed) {
-                const c1 = controllerPositions[0];
-                const c2 = controllerPositions[1];
-
-                if (!isGrabbing) {
-                    // Grab start
-                    isGrabbing = true;
-                    grabStartDistance = c1.distanceTo(c2);
-                    grabStartScale = currentScale;
-
-                    const grabMatrix = computeGrabMatrix(c1, c2, controllerQuaternions[0], controllerQuaternions[1]);
-                    const grabMatrixInverse = grabMatrix.clone().invert();
-                    const objectMatrix = new THREE.Matrix4().compose(
-                        group.position,
-                        group.quaternion,
-                        new THREE.Vector3(1, 1, 1)
-                    );
-                    grabLocalMatrix = grabMatrixInverse.multiply(objectMatrix);
-                } else {
-                    // Grab update
-                    const newGrabMatrix = computeGrabMatrix(c1, c2, controllerQuaternions[0], controllerQuaternions[1]);
-                    const newObjectMatrix = newGrabMatrix.clone().multiply(grabLocalMatrix);
-
-                    const pos = new THREE.Vector3();
-                    const quat = new THREE.Quaternion();
-                    const scl = new THREE.Vector3();
-                    newObjectMatrix.decompose(pos, quat, scl);
-
-                    group.position.copy(pos);
-                    group.quaternion.copy(quat);
-
-                    // Scale from controller distance
-                    const newDistance = c1.distanceTo(c2);
-                    if (grabStartDistance > 0.01) {
-                        currentScale = grabStartScale * (newDistance / grabStartDistance);
-                        currentScale = Math.min(Math.max(currentScale, 0.01), 4.0);
-                        group.scale.setScalar(currentScale);
-                    }
+                if (singleGrabControllerIndex >= 0) {
+                    endSingleHandGrab();
                 }
+
+                updateTwoHandGrab(
+                    controllerPositions[0], controllerPositions[1],
+                    controllerQuaternions[0], controllerQuaternions[1]
+                );
             } else {
-                isGrabbing = false;
+                if (isTwoHandGrabbing) {
+                    endTwoHandGrab();
+                }
+
+                if (triggerControllerIndex >= 0) {
+                    updateSingleHandGrab(triggerControllerIndex);
+                } else if (singleGrabControllerIndex >= 0) {
+                    endSingleHandGrab();
+                }
             }
+
+            // === A/X: snap to surface if available, else toggle visibility ===
+
+            const shouldHandleAX = (!didPressHideImage && previousDidPressHideImage);
+            previousDidPressHideImage = didPressHideImage;
+
+            if (shouldHandleAX) {
+                if (!snapToSurface()) {
+                    imagePlane.visible = !imagePlane.visible;
+                }
+            }
+
+            // === B/Y: toggle instructions ===
 
             const shouldChangeInstructionsVisibility = (!didPressHideInstructions && previousDidPressHideInstructions);
             previousDidPressHideInstructions = didPressHideInstructions;
 
             if (shouldChangeInstructionsVisibility) {
                 instructionsPlane.visible = !instructionsPlane.visible;
-            }
-
-            const shouldChangeImageVisibility = (!didPressHideImage && previousDidPressHideImage);
-            previousDidPressHideImage = didPressHideImage;
-
-            if (shouldChangeImageVisibility) {
-                imagePlane.visible = !imagePlane.visible;
             }
         }
 
